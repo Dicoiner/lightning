@@ -4,17 +4,19 @@
 #include <bitcoin/pubkey.h>
 #include <stdbool.h>
 
+struct basepoints;
+
 /* Keys needed to derive a particular commitment tx. */
 struct keyset {
 	struct pubkey self_revocation_key;
+	struct pubkey self_htlc_key, other_htlc_key;
 	struct pubkey self_delayed_payment_key;
 	struct pubkey self_payment_key, other_payment_key;
 };
 
+/* Self == owner of commitment tx, other == non-owner. */
 bool derive_keyset(const struct pubkey *per_commitment_point,
-		   const struct pubkey *self_payment_basepoint,
-		   const struct pubkey *other_payment_basepoint,
-		   const struct pubkey *self_delayed_basepoint,
-		   const struct pubkey *other_revocation_basepoint,
+		   const struct basepoints *self,
+		   const struct basepoints *other,
 		   struct keyset *keyset);
 #endif /* LIGHTNING_COMMON_KEYSET_H */

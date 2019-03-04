@@ -1,23 +1,19 @@
 /* JSON core and helpers */
 #include "json.h"
 #include <assert.h>
+#include <bitcoin/pubkey.h>
 #include <ccan/build_assert/build_assert.h>
+#include <ccan/mem/mem.h>
 #include <ccan/str/hex/hex.h>
 #include <ccan/tal/str/str.h>
-#include <ccan/tal/tal.h>
+#include <common/utils.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-struct json_result {
-	unsigned int indent;
-	/* tal_count() of this is strlen() + 1 */
-	char *s;
-};
-
-const char *json_tok_contents(const char *buffer, const jsmntok_t *t)
+const char *json_tok_full(const char *buffer, const jsmntok_t *t)
 {
 	if (t->type == JSMN_STRING)
 		return buffer + t->start - 1;
@@ -25,7 +21,7 @@ const char *json_tok_contents(const char *buffer, const jsmntok_t *t)
 }
 
 /* Include " if it's a string. */
-int json_tok_len(const jsmntok_t *t)
+int json_tok_full_len(const jsmntok_t *t)
 {
 	if (t->type == JSMN_STRING)
 		return t->end - t->start + 2;
@@ -41,7 +37,12 @@ bool json_tok_streq(const char *buffer, const jsmntok_t *tok, const char *str)
 	return strncmp(buffer + tok->start, str, tok->end - tok->start) == 0;
 }
 
-bool json_tok_u64(const char *buffer, const jsmntok_t *tok,
+char *json_strdup(const tal_t *ctx, const char *buffer, const jsmntok_t *tok)
+{
+	return tal_strndup(ctx, buffer + tok->start, tok->end - tok->start);
+}
+
+bool json_to_u64(const char *buffer, const jsmntok_t *tok,
 		  uint64_t *num)
 {
 	char *end;
@@ -64,7 +65,7 @@ bool json_tok_u64(const char *buffer, const jsmntok_t *tok,
 	return true;
 }
 
-bool json_tok_double(const char *buffer, const jsmntok_t *tok, double *num)
+bool json_to_double(const char *buffer, const jsmntok_t *tok, double *num)
 {
 	char *end;
 
@@ -74,12 +75,12 @@ bool json_tok_double(const char *buffer, const jsmntok_t *tok, double *num)
 	return true;
 }
 
-bool json_tok_number(const char *buffer, const jsmntok_t *tok,
-		     unsigned int *num)
+bool json_to_number(const char *buffer, const jsmntok_t *tok,
+		    unsigned int *num)
 {
 	uint64_t u64;
 
-	if (!json_tok_u64(buffer, tok, &u64))
+	if (!json_to_u64(buffer, tok, &u64))
 		return false;
 	*num = u64;
 
@@ -89,31 +90,72 @@ bool json_tok_number(const char *buffer, const jsmntok_t *tok,
 	return true;
 }
 
-bool json_tok_bitcoin_amount(const char *buffer, const jsmntok_t *tok,
-			     uint64_t *satoshi)
+bool json_to_int(const char *buffer, const jsmntok_t *tok, int *num)
 {
 	char *end;
-	unsigned long btc, sat;
+	long l;
 
-	btc = strtoul(buffer + tok->start, &end, 0);
-	if (btc == ULONG_MAX && errno == ERANGE)
-		return false;
-	if (end != buffer + tok->end) {
-		/* Expect always 8 decimal places. */
-		if (*end != '.' || buffer + tok->start - end != 9)
-			return false;
-		sat = strtoul(end+1, &end, 0);
-		if (sat == ULONG_MAX && errno == ERANGE)
-			return false;
-		if (end != buffer + tok->end)
-			return false;
-	} else
-		sat = 0;
-
-	*satoshi = btc * (uint64_t)100000000 + sat;
-	if (*satoshi != btc * (uint64_t)100000000 + sat)
+	l = strtol(buffer + tok->start, &end, 0);
+	if (end != buffer + tok->end)
 		return false;
 
+	BUILD_ASSERT(sizeof(l) >= sizeof(*num));
+	*num = l;
+
+	/* Check for overflow/underflow */
+	if ((l == LONG_MAX || l == LONG_MIN) && errno == ERANGE)
+		return false;
+
+	/* Check for truncation */
+	if (*num != l)
+		return false;
+
+	return true;
+}
+
+bool json_to_bool(const char *buffer, const jsmntok_t *tok, bool *b)
+{
+	if (tok->type != JSMN_PRIMITIVE)
+		return false;
+	if (memeqstr(buffer + tok->start, tok->end - tok->start, "true")) {
+		*b = true;
+		return true;
+	}
+	if (memeqstr(buffer + tok->start, tok->end - tok->start, "false")) {
+		*b = false;
+		return true;
+	}
+	return false;
+}
+
+u8 *json_tok_bin_from_hex(const tal_t *ctx, const char *buffer, const jsmntok_t *tok)
+{
+	u8 *result;
+	size_t hexlen, rawlen;
+	hexlen = tok->end - tok->start;
+	rawlen = hex_data_size(hexlen);
+
+	result = tal_arr(ctx, u8, rawlen);
+	if (!hex_decode(buffer + tok->start, hexlen, result, rawlen))
+		return tal_free(result);
+
+	return result;
+}
+
+bool json_to_preimage(const char *buffer, const jsmntok_t *tok, struct preimage *preimage)
+{
+	size_t hexlen = tok->end - tok->start;
+	return hex_decode(buffer + tok->start, hexlen, preimage->r, sizeof(preimage->r));
+}
+
+bool json_tok_is_num(const char *buffer, const jsmntok_t *tok)
+{
+	if (tok->type != JSMN_PRIMITIVE)
+		return false;
+
+	for (int i = tok->start; i < tok->end; i++)
+		if (!cisdigit(buffer[i]))
+			return false;
 	return true;
 }
 
@@ -122,23 +164,6 @@ bool json_tok_is_null(const char *buffer, const jsmntok_t *tok)
 	if (tok->type != JSMN_PRIMITIVE)
 		return false;
 	return buffer[tok->start] == 'n';
-}
-
-bool json_tok_bool(const char *buffer, const jsmntok_t *tok, bool *b)
-{
-	if (tok->type != JSMN_PRIMITIVE)
-		return false;
-	if (tok->end - tok->start == strlen("true")
-	    && memcmp(buffer + tok->start, "true", strlen("true")) == 0) {
-		*b = true;
-		return true;
-	}
-	if (tok->end - tok->start == strlen("false")
-	    && memcmp(buffer + tok->start, "false", strlen("false")) == 0) {
-		*b = false;
-		return true;
-	}
-	return false;
 }
 
 const jsmntok_t *json_next(const jsmntok_t *tok)
@@ -155,12 +180,13 @@ const jsmntok_t *json_next(const jsmntok_t *tok)
 const jsmntok_t *json_get_member(const char *buffer, const jsmntok_t tok[],
 				 const char *label)
 {
-	const jsmntok_t *t, *end;
+	const jsmntok_t *t;
+	size_t i;
 
-	assert(tok->type == JSMN_OBJECT);
+	if (tok->type != JSMN_OBJECT)
+		return NULL;
 
-	end = json_next(tok);
-	for (t = tok + 1; t < end; t = json_next(t+1))
+	json_for_each_obj(i, t, tok)
 		if (json_tok_streq(buffer, t, label))
 			return t + 1;
 
@@ -169,12 +195,13 @@ const jsmntok_t *json_get_member(const char *buffer, const jsmntok_t tok[],
 
 const jsmntok_t *json_get_arr(const jsmntok_t tok[], size_t index)
 {
-	const jsmntok_t *t, *end;
+	const jsmntok_t *t;
+	size_t i;
 
-	assert(tok->type == JSMN_ARRAY);
+	if (tok->type != JSMN_ARRAY)
+		return NULL;
 
-	end = json_next(tok);
-	for (t = tok + 1; t < end; t = json_next(t)) {
+	json_for_each_arr(i, t, tok) {
 		if (index == 0)
 			return t;
 		index--;
@@ -183,290 +210,140 @@ const jsmntok_t *json_get_arr(const jsmntok_t tok[], size_t index)
 	return NULL;
 }
 
-/* Guide is a string with . for members, [] around indexes. */
-const jsmntok_t *json_delve(const char *buffer,
-			    const jsmntok_t *tok,
-			    const char *guide)
-{
-	while (*guide) {
-		const char *key;
-		size_t len = strcspn(guide+1, ".[]");
-
-		key = tal_strndup(NULL, guide+1, len);
-		switch (guide[0]) {
-		case '.':
-			if (tok->type != JSMN_OBJECT)
-				return tal_free(key);
-			tok = json_get_member(buffer, tok, key);
-			if (!tok)
-				return tal_free(key);
-			break;
-		case '[':
-			if (tok->type != JSMN_ARRAY)
-				return tal_free(key);
-			tok = json_get_arr(tok, atol(key));
-			if (!tok)
-				return tal_free(key);
-			/* Must be terminated */
-			assert(guide[1+strlen(key)] == ']');
-			len++;
-			break;
-		default:
-			abort();
-		}
-		tal_free(key);
-		guide += len + 1;
-	}
-
-	return tok;
-}
-
-/* FIXME: Return false if unknown params specified, too! */
-bool json_get_params(const char *buffer, const jsmntok_t param[], ...)
-{
-	va_list ap;
-	const char *name;
-	 /* Uninitialized warnings on p and end */
-	const jsmntok_t **tokptr, *p = NULL, *end = NULL;
-
-	if (param->type == JSMN_ARRAY) {
-		if (param->size == 0)
-			p = NULL;
-		else
-			p = param + 1;
-		end = json_next(param);
-	} else
-		assert(param->type == JSMN_OBJECT);
-
-	va_start(ap, param);
-	while ((name = va_arg(ap, const char *)) != NULL) {
-		tokptr = va_arg(ap, const jsmntok_t **);
-		bool compulsory = true;
-		if (name[0] == '?') {
-			name++;
-			compulsory = false;
-		}
-		if (param->type == JSMN_ARRAY) {
-			*tokptr = p;
-			if (p) {
-				p = json_next(p);
-				if (p == end)
-					p = NULL;
-			}
-		} else {
-			*tokptr = json_get_member(buffer, param, name);
-		}
-		/* Convert 'null' to NULL */
-		if (*tokptr
-		    && (*tokptr)->type == JSMN_PRIMITIVE
-		    && buffer[(*tokptr)->start] == 'n') {
-			*tokptr = NULL;
-		}
-		if (compulsory && !*tokptr)
-			return false;
-	}
-
-	va_end(ap);
-	return true;
-}
-
-jsmntok_t *json_parse_input(const char *input, int len, bool *valid)
+jsmntok_t *json_parse_input(const tal_t *ctx,
+			    const char *input, int len, bool *valid)
 {
 	jsmn_parser parser;
 	jsmntok_t *toks;
-	jsmnerr_t ret;
+	int ret;
 
-	toks = tal_arr(input, jsmntok_t, 10);
+	toks = tal_arr(ctx, jsmntok_t, 10);
+	toks[0].type = JSMN_UNDEFINED;
 
-again:
 	jsmn_init(&parser);
+again:
 	ret = jsmn_parse(&parser, input, len, toks, tal_count(toks) - 1);
 
 	switch (ret) {
 	case JSMN_ERROR_INVAL:
 		*valid = false;
 		return tal_free(toks);
-	case JSMN_ERROR_PART:
-		*valid = true;
-		return tal_free(toks);
 	case JSMN_ERROR_NOMEM:
 		tal_resize(&toks, tal_count(toks) * 2);
 		goto again;
 	}
 
+	/* Check whether we read at least one full root element, i.e., root
+	 * element has its end set. */
+	if (toks[0].type == JSMN_UNDEFINED || toks[0].end == -1) {
+		*valid = true;
+		return tal_free(toks);
+	}
+
+	/* If we read a partial element at the end of the stream we'll get a
+	 * ret=JSMN_ERROR_PART, but due to the previous check we know we read at
+	 * least one full element, so count tokens that are part of this root
+	 * element. */
+	ret = json_next(toks) - toks;
+
 	/* Cut to length and return. */
 	*valid = true;
 	tal_resize(&toks, ret + 1);
-	/* Make sure last one is always referencable. */
+	/* Make sure last one is always referenceable. */
 	toks[ret].type = -1;
 	toks[ret].start = toks[ret].end = toks[ret].size = 0;
 
 	return toks;
 }
 
-static void result_append(struct json_result *res, const char *str)
+const char *jsmntype_to_string(jsmntype_t t)
 {
-	size_t len = tal_count(res->s) - 1;
-
-	tal_resize(&res->s, len + strlen(str) + 1);
-	strcpy(res->s + len, str);
-}
-
-static void PRINTF_FMT(2,3)
-result_append_fmt(struct json_result *res, const char *fmt, ...)
-{
-	size_t len = tal_count(res->s) - 1, fmtlen;
-	va_list ap;
-
-	va_start(ap, fmt);
-	fmtlen = vsnprintf(NULL, 0, fmt, ap);
-	va_end(ap);
-
-	tal_resize(&res->s, len + fmtlen + 1);
-	va_start(ap, fmt);
-	vsprintf(res->s + len, fmt, ap);
-	va_end(ap);
-}
-
-static bool result_ends_with(struct json_result *res, const char *str)
-{
-	size_t len = tal_count(res->s) - 1;
-
-	if (strlen(str) > len)
-		return false;
-	return streq(res->s + len - strlen(str), str);
-}
-
-static void json_start_member(struct json_result *result, const char *fieldname)
-{
-	/* Prepend comma if required. */
-	if (result->s[0]
-	    && !result_ends_with(result, "{ ")
-	    && !result_ends_with(result, "[ "))
-		result_append(result, ", ");
-	if (fieldname)
-		result_append_fmt(result, "\"%s\" : ", fieldname);
-}
-
-void json_array_start(struct json_result *result, const char *fieldname)
-{
-	json_start_member(result, fieldname);
-	if (result->indent) {
-		unsigned int i;
-		result_append(result, "\n");
-		for (i = 0; i < result->indent; i++)
-			result_append(result, "\t");
+	switch (t) {
+		case JSMN_UNDEFINED :
+			return "UNDEFINED";
+		case JSMN_OBJECT :
+			return "OBJECT";
+		case JSMN_ARRAY :
+			return "ARRAY";
+		case JSMN_STRING :
+			return "STRING";
+		case JSMN_PRIMITIVE :
+			return "PRIMITIVE";
 	}
-	result_append(result, "[ ");
-	result->indent++;
+	return "INVALID";
 }
 
-void json_array_end(struct json_result *result)
+void json_tok_print(const char *buffer, const jsmntok_t *tok)
 {
-	assert(result->indent);
-	result->indent--;
-	result_append(result, " ]");
-}
-
-void json_object_start(struct json_result *result, const char *fieldname)
-{
-	json_start_member(result, fieldname);
-	if (result->indent) {
-		unsigned int i;
-		result_append(result, "\n");
-		for (i = 0; i < result->indent; i++)
-			result_append(result, "\t");
+	const jsmntok_t *first = tok;
+	const jsmntok_t *last = json_next(tok);
+	printf("size: %d, count: %td\n", tok->size, last - first);
+	while (first != last) {
+		printf("%td. %.*s, %s\n", first - tok,
+		        first->end - first->start, buffer + first->start,
+			jsmntype_to_string(first->type));
+		first++;
 	}
-	result_append(result, "{ ");
-	result->indent++;
+	printf("\n");
 }
 
-void json_object_end(struct json_result *result)
+jsmntok_t *json_tok_copy(const tal_t *ctx, const jsmntok_t *tok)
 {
-	assert(result->indent);
-	result->indent--;
-	result_append(result, " }");
+	return tal_dup_arr(ctx, jsmntok_t, tok, json_next(tok) - tok, 0);
 }
 
-void json_add_num(struct json_result *result, const char *fieldname, unsigned int value)
+void json_tok_remove(jsmntok_t **tokens, jsmntok_t *tok, size_t num)
 {
-	json_start_member(result, fieldname);
-	result_append_fmt(result, "%u", value);
+	assert(*tokens);
+	assert((*tokens)->type == JSMN_ARRAY || (*tokens)->type == JSMN_OBJECT);
+	const jsmntok_t *src = tok;
+	const jsmntok_t *end = json_next(*tokens);
+	jsmntok_t *dest = tok;
+	int remove_count;
+
+	for (int i = 0; i < num; i++)
+		src = json_next(src);
+
+	remove_count = src - tok;
+
+	memmove(dest, src, sizeof(jsmntok_t) * (end - src));
+
+	tal_resize(tokens, tal_count(*tokens) - remove_count);
+	(*tokens)->size -= num;
 }
 
-void json_add_u64(struct json_result *result, const char *fieldname,
-		  uint64_t value)
+const jsmntok_t *json_delve(const char *buffer,
+			    const jsmntok_t *tok,
+			    const char *guide)
 {
-	json_start_member(result, fieldname);
-	result_append_fmt(result, "%"PRIu64, value);
-}
+       while (*guide) {
+               const char *key;
+               size_t len = strcspn(guide+1, ".[]");
 
-void json_add_literal(struct json_result *result, const char *fieldname,
-		      const char *literal, int len)
-{
-	json_start_member(result, fieldname);
-	result_append_fmt(result, "%.*s", len, literal);
-}
+               key = tal_strndup(tmpctx, guide+1, len);
+               switch (guide[0]) {
+               case '.':
+                       if (tok->type != JSMN_OBJECT)
+                               return NULL;
+                       tok = json_get_member(buffer, tok, key);
+                       if (!tok)
+                               return NULL;
+                       break;
+               case '[':
+                       if (tok->type != JSMN_ARRAY)
+                               return NULL;
+                       tok = json_get_arr(tok, atol(key));
+                       if (!tok)
+                               return NULL;
+                       /* Must be terminated */
+                       assert(guide[1+strlen(key)] == ']');
+                       len++;
+                       break;
+               default:
+                       abort();
+               }
+               guide += len + 1;
+       }
 
-void json_add_string(struct json_result *result, const char *fieldname, const char *value)
-{
-	json_start_member(result, fieldname);
-	result_append_fmt(result, "\"%s\"", value);
-}
-
-void json_add_bool(struct json_result *result, const char *fieldname, bool value)
-{
-	json_start_member(result, fieldname);
-	result_append(result, value ? "true" : "false");
-}
-
-void json_add_null(struct json_result *result, const char *fieldname)
-{
-	json_start_member(result, fieldname);
-	result_append(result, "null");
-}
-
-void json_add_hex(struct json_result *result, const char *fieldname,
-		  const void *data, size_t len)
-{
-	char hex[hex_str_size(len)];
-
-	hex_encode(data, len, hex, sizeof(hex));
-	json_add_string(result, fieldname, hex);
-}
-
-void json_add_object(struct json_result *result, ...)
-{
-	va_list ap;
-	const char *field;
-
-	va_start(ap, result);
-	json_object_start(result, NULL);
-	while ((field = va_arg(ap, const char *)) != NULL) {
-		jsmntype_t type = va_arg(ap, jsmntype_t);
-		const char *value = va_arg(ap, const char *);
-		if (type == JSMN_STRING)
-			json_add_string(result, field, value);
-		else
-			json_add_literal(result, field, value, strlen(value));
-	}
-	json_object_end(result);
-	va_end(ap);
-}
-
-struct json_result *new_json_result(const tal_t *ctx)
-{
-	struct json_result *r = tal(ctx, struct json_result);
-
-	/* Using tal_arr means that it has a valid count. */
-	r->s = tal_arrz(r, char, 1);
-	r->indent = 0;
-	return r;
-}
-
-const char *json_result_string(const struct json_result *result)
-{
-	assert(!result->indent);
-	assert(tal_count(result->s) == strlen(result->s) + 1);
-	return result->s;
+       return tok;
 }

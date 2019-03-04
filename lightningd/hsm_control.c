@@ -2,6 +2,7 @@
 #include "lightningd.h"
 #include "subd.h"
 #include <ccan/err/err.h>
+#include <ccan/fdpass/fdpass.h>
 #include <ccan/io/io.h>
 #include <ccan/take/take.h>
 #include <common/status.h>
@@ -9,52 +10,94 @@
 #include <errno.h>
 #include <hsmd/gen_hsm_wire.h>
 #include <inttypes.h>
+#include <lightningd/hsm_control.h>
 #include <lightningd/log.h>
+#include <lightningd/log_status.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <wally_bip32.h>
 #include <wire/wire_sync.h>
 
-u8 *hsm_sync_read(const tal_t *ctx, struct lightningd *ld)
+static int hsm_get_fd(struct lightningd *ld,
+		      const struct pubkey *id,
+		      u64 dbid,
+		      int capabilities)
 {
-	for (;;) {
-		u8 *msg = wire_sync_read(ctx, ld->hsm_fd);
-		if (!msg)
-			fatal("Could not write from HSM: %s", strerror(errno));
-		if (fromwire_peektype(msg) != STATUS_TRACE)
-			return msg;
+	int hsm_fd;
+	u8 *msg;
 
-		log_debug(ld->log, "HSM TRACE: %.*s",
-			  (int)(tal_len(msg) - sizeof(be16)),
-			  (char *)msg + sizeof(be16));
-		tal_free(msg);
-	}
+	msg = towire_hsm_client_hsmfd(NULL, id, dbid, capabilities);
+	if (!wire_sync_write(ld->hsm_fd, take(msg)))
+		fatal("Could not write to HSM: %s", strerror(errno));
+
+	msg = wire_sync_read(tmpctx, ld->hsm_fd);
+	if (!fromwire_hsm_client_hsmfd_reply(msg))
+		fatal("Bad reply from HSM: %s", tal_hex(tmpctx, msg));
+
+	hsm_fd = fdpass_recv(ld->hsm_fd);
+	if (hsm_fd < 0)
+		fatal("Could not read fd from HSM: %s", strerror(errno));
+	return hsm_fd;
 }
 
-void hsm_init(struct lightningd *ld, bool newdir)
+int hsm_get_client_fd(struct lightningd *ld,
+		      const struct pubkey *id,
+		      u64 dbid,
+		      int capabilities)
 {
-	const tal_t *tmpctx = tal_tmpctx(ld);
-	u8 *msg;
-	bool create;
+	assert(dbid);
 
-	ld->hsm_fd = subd_raw(ld, "lightning_hsmd");
-	if (ld->hsm_fd < 0)
+	return hsm_get_fd(ld, id, dbid, capabilities);
+}
+
+int hsm_get_global_fd(struct lightningd *ld, int capabilities)
+{
+	return hsm_get_fd(ld, &ld->id, 0, capabilities);
+}
+
+static unsigned int hsm_msg(struct subd *hsmd,
+			    const u8 *msg, const int *fds UNUSED)
+{
+	/* We only expect one thing from the HSM that's not a STATUS message */
+	struct pubkey client_id;
+	u8 *bad_msg;
+	char *desc;
+
+	if (!fromwire_hsmstatus_client_bad_request(tmpctx, msg, &client_id,
+						   &desc, &bad_msg))
+		fatal("Bad status message from hsmd: %s", tal_hex(tmpctx, msg));
+
+	/* This should, of course, never happen. */
+	log_broken(hsmd->log, "client %s %s (request %s)",
+		   type_to_string(tmpctx, struct pubkey, &client_id),
+		   desc, tal_hex(tmpctx, bad_msg));
+	return 0;
+}
+
+void hsm_init(struct lightningd *ld)
+{
+	u8 *msg;
+	int fds[2];
+
+	/* We actually send requests synchronously: only status is async. */
+	if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) != 0)
+		err(1, "Could not create hsm socketpair");
+
+	ld->hsm = new_global_subd(ld, "lightning_hsmd",
+				  hsm_wire_type_name,
+				  hsm_msg,
+				  take(&fds[1]), NULL);
+	if (!ld->hsm)
 		err(1, "Could not subd hsm");
 
-	if (newdir)
-		create = true;
-	else
-		create = (access("hsm_secret", F_OK) != 0);
-
-	if (!wire_sync_write(ld->hsm_fd, towire_hsmctl_init(tmpctx, create)))
+	ld->hsm_fd = fds[0];
+	if (!wire_sync_write(ld->hsm_fd, towire_hsm_init(tmpctx)))
 		err(1, "Writing init msg to hsm");
 
 	ld->wallet->bip32_base = tal(ld->wallet, struct ext_key);
-	msg = hsm_sync_read(tmpctx, ld);
-	if (!fromwire_hsmctl_init_reply(msg, NULL,
-					&ld->id,
-					&ld->peer_seed,
-					ld->wallet->bip32_base))
+	msg = wire_sync_read(tmpctx, ld->hsm_fd);
+	if (!fromwire_hsm_init_reply(msg,
+				     &ld->id, ld->wallet->bip32_base))
 		errx(1, "HSM did not give init reply");
-
-	tal_free(tmpctx);
 }

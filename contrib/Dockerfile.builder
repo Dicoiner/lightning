@@ -1,27 +1,69 @@
 FROM ubuntu:16.04
+MAINTAINER Christian Decker <decker.christian@gmail.com>
 
 ENV DEBIAN_FRONTEND noninteractive
+ENV BITCOIN_VERSION 0.17.0
+
 WORKDIR /build
 
-RUN echo "deb http://ppa.launchpad.net/bitcoin/bitcoin/ubuntu xenial main" | tee -a /etc/apt/sources.list.d/bitcoin.list
 RUN apt-get -qq update && \
-    apt-get -qq install --allow-unauthenticated -yy \
-        eatmydata \
+    apt-get -qq install --no-install-recommends --allow-unauthenticated -yy \
+	asciidoc \
+	autoconf \
+	automake \
+	clang \
+	cppcheck \
+	docbook-xml \
+	shellcheck \
+	eatmydata \
 	software-properties-common \
 	build-essential \
 	autoconf \
+	locales \
 	libtool \
 	libprotobuf-c-dev \
 	libsqlite3-dev \
 	libgmp-dev \
-	libsqlite3-dev \
 	git \
 	python \
 	python3 \
 	valgrind \
 	net-tools \
-	bitcoind \
 	python3-pip \
-	&& rm -rf /var/lib/apt/lists/*
+	python3-setuptools \
+	python-pkg-resources \
+	shellcheck \
+	libxml2-utils \
+	wget \
+	xsltproc \
+	zlib1g-dev && \
+	rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install python-bitcoinlib==0.7.0
+ENV LANGUAGE=en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+RUN locale-gen en_US.UTF-8 && dpkg-reconfigure locales
+
+RUN cd /tmp/ && \
+    wget https://bitcoin.org/bin/bitcoin-core-$BITCOIN_VERSION/bitcoin-$BITCOIN_VERSION-x86_64-linux-gnu.tar.gz -O bitcoin.tar.gz && \
+    tar -xvzf bitcoin.tar.gz && \
+    mv /tmp/bitcoin-$BITCOIN_VERSION/bin/bitcoin* /usr/local/bin/ && \
+    rm -rf bitcoin.tar.gz /tmp/bitcoin-$BITCOIN_VERSION
+
+RUN pip3 install --upgrade pip && \
+    python3 -m pip install \
+	CherryPy==17.3.0 \
+	Flask==1.0.2 \
+	cheroot==6.5.2 \
+	ephemeral-port-reserve==1.1.0 \
+	flaky==3.4.0 \
+	pytest-benchmark==3.1.1 \
+        pytest-forked==0.2 \
+	pytest-timeout==1.3.3 \
+	pytest-xdist==1.22.2 \
+	pytest==3.8.1 \
+	python-bitcoinlib==0.7.0 \
+	tqdm==4.26.0 \
+	pytest-test-groups==1.0.3 \
+	flake8==3.5.0 \
+	pytest-rerunfailures==3.1

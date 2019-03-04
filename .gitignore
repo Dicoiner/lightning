@@ -6,7 +6,12 @@
 *.pb
 *.gcda
 *.gcno
+*.dSYM
+*.rej
+*.pyc
+.cppcheck-suppress
 TAGS
+tags
 ccan/tools/configurator/configurator
 ccan/ccan/cdump/tools/cdump-enumstr
 gen_*
@@ -15,15 +20,21 @@ tools/check-bolt
 coverage
 ccan/config.h
 __pycache__
+config.vars
 
 # Ignore some generated binaries
-lightningd/test/run-channel
-lightningd/test/run-cryptomsg
-lightningd/test/run-commit_tx
-lightningd/test/run-funding_tx
-lightningd/test/run-key_derive
-wire/test/run-peer-wire
-bitcoin/test/run-tx-encode
-daemon/test/run-maxfee
+*/test/run-*
+!*/test/run-*.c
+external/libbacktrace-build/
+external/libbacktrace.a
+external/libbacktrace.la
 test/test_protocol
 test/test_sphinx
+tests/.pytest.restart
+gossip_store
+.pytest_cache
+tools/headerversions
+.tmp.lightningrfc/
+contrib/pylightning/build/
+contrib/pylightning/dist/
+contrib/pylightning/pylightning.egg-info/

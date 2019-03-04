@@ -1,41 +1,72 @@
+#include <bitcoin/script.h>
+#include <common/key_derive.h>
 #include <common/utxo.h>
 #include <wire/wire.h>
 
 void towire_utxo(u8 **pptr, const struct utxo *utxo)
 {
-	towire_sha256_double(pptr, &utxo->txid);
+	/* Is this a unilateral close output and needs the
+	 * close_info? */
+	bool is_unilateral_close = utxo->close_info != NULL;
+	towire_bitcoin_txid(pptr, &utxo->txid);
 	towire_u32(pptr, utxo->outnum);
-	towire_u64(pptr, utxo->amount);
+	towire_amount_sat(pptr, utxo->amount);
 	towire_u32(pptr, utxo->keyindex);
 	towire_bool(pptr, utxo->is_p2sh);
+
+	towire_bool(pptr, is_unilateral_close);
+	if (is_unilateral_close) {
+		towire_u64(pptr, utxo->close_info->channel_id);
+		towire_pubkey(pptr, &utxo->close_info->peer_id);
+		towire_pubkey(pptr, &utxo->close_info->commitment_point);
+	}
 }
 
-void fromwire_utxo(const u8 **ptr, size_t *max, struct utxo *utxo)
+struct utxo *fromwire_utxo(const tal_t *ctx, const u8 **ptr, size_t *max)
 {
-	fromwire_sha256_double(ptr, max, &utxo->txid);
+	struct utxo *utxo = tal(ctx, struct utxo);
+
+	fromwire_bitcoin_txid(ptr, max, &utxo->txid);
 	utxo->outnum = fromwire_u32(ptr, max);
-	utxo->amount = fromwire_u64(ptr, max);
+	utxo->amount = fromwire_amount_sat(ptr, max);
 	utxo->keyindex = fromwire_u32(ptr, max);
 	utxo->is_p2sh = fromwire_bool(ptr, max);
-}
 
+	/* No need to tell hsmd about the scriptPubkey, it has all the info to
+	 * derive it from the rest. */
+	utxo->scriptPubkey = NULL;
 
-struct utxo *from_utxoptr_arr(const tal_t *ctx, const struct utxo **utxos)
-{
-	size_t i, n = tal_count(utxos);
-	struct utxo *utxo = tal_arr(ctx, struct utxo, n);
-
-	for (i = 0; i < n; i++)
-		utxo[i] = *utxos[i];
+	if (fromwire_bool(ptr, max)) {
+		utxo->close_info = tal(utxo, struct unilateral_close_info);
+		utxo->close_info->channel_id = fromwire_u64(ptr, max);
+		fromwire_pubkey(ptr, max, &utxo->close_info->peer_id);
+		fromwire_pubkey(ptr, max, &utxo->close_info->commitment_point);
+	} else {
+		utxo->close_info = NULL;
+	}
 	return utxo;
 }
 
-const struct utxo **to_utxoptr_arr(const tal_t *ctx, const struct utxo *utxos)
+struct bitcoin_tx *tx_spending_utxos(const tal_t *ctx,
+				     const struct utxo **utxos,
+				     const struct ext_key *bip32_base,
+				     bool add_change_output)
 {
-	size_t i, n = tal_count(utxos);
-	const struct utxo **utxo = tal_arr(ctx, const struct utxo *, n);
+	struct bitcoin_tx *tx =
+	    bitcoin_tx(ctx, tal_count(utxos), add_change_output ? 2 : 1);
 
-	for (i = 0; i < n; i++)
-		utxo[i] = &utxos[i];
-	return utxo;
+	for (size_t i = 0; i < tal_count(utxos); i++) {
+		tx->input[i].txid = utxos[i]->txid;
+		tx->input[i].index = utxos[i]->outnum;
+		tx->input[i].amount = tal_dup(tx, struct amount_sat,
+					      &utxos[i]->amount);
+		if (utxos[i]->is_p2sh && bip32_base) {
+			struct pubkey key;
+			bip32_pubkey(bip32_base, &key, utxos[i]->keyindex);
+			tx->input[i].script =
+				bitcoin_scriptsig_p2sh_p2wpkh(tx, &key);
+		}
+	}
+
+	return tx;
 }

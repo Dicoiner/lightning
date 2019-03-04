@@ -1,114 +1,152 @@
-# Peers can give a bad message, we close their fd, but no harm done.
-gossipstatus_peer_bad_msg,1000
-gossipstatus_peer_bad_msg,,unique_id,8
-gossipstatus_peer_bad_msg,,len,2
-gossipstatus_peer_bad_msg,,err,len*u8
-
-# Misc problems like opening control fd.
-gossipstatus_peer_failed,1001
-gossipstatus_peer_failed,,unique_id,8
-gossipstatus_peer_failed,,len,2
-gossipstatus_peer_failed,,err,len*u8
-
 #include <common/cryptomsg.h>
+#include <common/wireaddr.h>
+#include <wire/gen_onion_wire.h>
 
-# Initialize the gossip daemon
-gossipctl_init,0
-gossipctl_init,,broadcast_interval,4
-gossipctl_init,,chain_hash,struct sha256_double
-
-# These take an fd, but have no response
-# (if it is to move onto a channel, we get a status msg).
-gossipctl_new_peer,1
-gossipctl_new_peer,,unique_id,8
-gossipctl_new_peer,,crypto_state,struct crypto_state
-
-# Tell it to release a peer which has initialized.
-gossipctl_release_peer,2
-gossipctl_release_peer,,unique_id,8
-
-# This releases the peer and returns the cryptostate (followed two fds: peer and gossip)
-gossipctl_release_peer_reply,102
-gossipctl_release_peer_reply,,crypto_state,struct crypto_state
-
-# This is if we couldn't find the peer.
-gossipctl_release_peer_replyfail,202
-
-# This is where we save a peer's features.
-#gossipstatus_peer_features,1
-#gossipstatus_peer_features,,unique_id,8
-#gossipstatus_peer_features,,gflen,2
-#gossipstatus_peer_features,,globalfeatures,gflen
-#gossipstatus_peer_features,,lflen,2
-#gossipstatus_peer_features,,localfeatures,lflen
-
-# Peer can send non-gossip packet (usually an open_channel) (followed two fds: peer and gossip)
-gossipstatus_peer_nongossip,4
-gossipstatus_peer_nongossip,,unique_id,8
-gossipstatus_peer_nongossip,,crypto_state,struct crypto_state
-gossipstatus_peer_nongossip,,len,2
-gossipstatus_peer_nongossip,,msg,len*u8
+# Initialize the gossip daemon.
+gossipctl_init,3000
+gossipctl_init,,broadcast_interval_msec,u32
+gossipctl_init,,chain_hash,struct bitcoin_blkid
+gossipctl_init,,id,struct pubkey
+gossipctl_init,,gflen,u16
+gossipctl_init,,globalfeatures,gflen*u8
+gossipctl_init,,rgb,3*u8
+gossipctl_init,,alias,32*u8
+gossipctl_init,,update_channel_interval,u32
+gossipctl_init,,num_announcable,u16
+gossipctl_init,,announcable,num_announcable*struct wireaddr
 
 # Pass JSON-RPC getnodes call through
-gossip_getnodes_request,5
+gossip_getnodes_request,3005
+gossip_getnodes_request,,id,?struct pubkey
 
 #include <lightningd/gossip_msg.h>
-gossip_getnodes_reply,105
+gossip_getnodes_reply,3105
 gossip_getnodes_reply,,num_nodes,u16
 gossip_getnodes_reply,,nodes,num_nodes*struct gossip_getnodes_entry
 
 # Pass JSON-RPC getroute call through
-gossip_getroute_request,6
+gossip_getroute_request,3006
 gossip_getroute_request,,source,struct pubkey
 gossip_getroute_request,,destination,struct pubkey
-gossip_getroute_request,,msatoshi,u32
-gossip_getroute_request,,riskfactor,u16
+gossip_getroute_request,,msatoshi,struct amount_msat
+# We don't pass doubles, so pass riskfactor * 1000000.
+gossip_getroute_request,,riskfactor_by_million,u64
+gossip_getroute_request,,final_cltv,u32
+gossip_getroute_request,,fuzz,double
+gossip_getroute_request,,num_excluded,u16
+gossip_getroute_request,,excluded,num_excluded*struct short_channel_id_dir
+gossip_getroute_request,,max_hops,u32
 
-gossip_getroute_reply,106
+gossip_getroute_reply,3106
 gossip_getroute_reply,,num_hops,u16
 gossip_getroute_reply,,hops,num_hops*struct route_hop
 
-gossip_getchannels_request,7
+gossip_getchannels_request,3007
+gossip_getchannels_request,,short_channel_id,?struct short_channel_id
+gossip_getchannels_request,,source,?struct pubkey
 
-gossip_getchannels_reply,107
+gossip_getchannels_reply,3107
 gossip_getchannels_reply,,num_channels,u16
 gossip_getchannels_reply,,nodes,num_channels*struct gossip_getchannels_entry
 
-# Ping/pong test.
-gossip_ping,8
-gossip_ping,,unique_id,u64
+# Ping/pong test.  Waits for a reply if it expects one.
+gossip_ping,3008
+gossip_ping,,id,struct pubkey
 gossip_ping,,num_pong_bytes,u16
 gossip_ping,,len,u16
 
-gossip_ping_reply,108
+gossip_ping_reply,3108
+gossip_ping_reply,,id,struct pubkey
+# False if id in gossip_ping was unknown.
+gossip_ping_reply,,sent,bool
+# 0 == no pong expected
 gossip_ping_reply,,totlen,u16
 
-# Given a short_channel_id, return the endpoints
-gossip_resolve_channel_request,9
-gossip_resolve_channel_request,,channel_id,struct short_channel_id
+# Test of query_short_channel_ids.  Master->gossipd
+gossip_query_scids,3031
+gossip_query_scids,,id,struct pubkey
+gossip_query_scids,,num_ids,u16
+gossip_query_scids,,ids,num_ids*struct short_channel_id
 
-gossip_resolve_channel_reply,109
-gossip_resolve_channel_reply,,num_keys,u16
-gossip_resolve_channel_reply,,keys,num_keys*struct pubkey
+# Gossipd -> master
+gossip_scids_reply,3131
+gossip_scids_reply,,ok,bool
+gossip_scids_reply,,complete,bool
 
-# The main daemon forward some gossip message to gossipd, allows injecting
-# arbitrary gossip messages.
-gossip_forwarded_msg,10
-gossip_forwarded_msg,,msglen,2
-gossip_forwarded_msg,,msg,msglen
+# Test gossip timestamp filtering.
+gossip_send_timestamp_filter,3028
+gossip_send_timestamp_filter,,id,struct pubkey
+gossip_send_timestamp_filter,,first_timestamp,u32
+gossip_send_timestamp_filter,,timestamp_range,u32
 
-# If peer is still connected, fail it (master does this for reconnect)
-gossipctl_fail_peer,11
-gossipctl_fail_peer,,unique_id,8
+# Test of query_channel_range.  Master->gossipd
+gossip_query_channel_range,3029
+gossip_query_channel_range,,id,struct pubkey
+gossip_query_channel_range,,first_blocknum,u32
+gossip_query_channel_range,,number_of_blocks,u32
 
-# Get a gossip fd for this peer (it has reconnected)
-gossipctl_get_peer_gossipfd,12
-gossipctl_get_peer_gossipfd,,unique_id,u64
-# Does it want a full dump of gossip?
-gossipctl_get_peer_gossipfd,,sync,bool
+# Gossipd -> master
+gossip_query_channel_range_reply,3129
+gossip_query_channel_range_reply,,final_first_block,u32
+gossip_query_channel_range_reply,,final_num_blocks,u32
+gossip_query_channel_range_reply,,final_complete,bool
+gossip_query_channel_range_reply,,num,u16
+gossip_query_channel_range_reply,,scids,num*struct short_channel_id
 
-# + fd.
-gossipctl_get_peer_gossipfd_reply,112
+# Set artificial maximum reply_channel_range size.  Master->gossipd
+gossip_dev_set_max_scids_encode_size,3030
+gossip_dev_set_max_scids_encode_size,,max,u32
 
-# Failure (can't make new socket)
-gossipctl_get_peer_gossipfd_replyfail,212
+# Given a short_channel_id, return the other endpoint (or none if DNE)
+gossip_get_channel_peer,3009
+gossip_get_channel_peer,,channel_id,struct short_channel_id
+
+gossip_get_channel_peer_reply,3109
+gossip_get_channel_peer_reply,,peer_id,?struct pubkey
+
+# gossipd->master: we're closing this channel.
+gossip_local_channel_close,3027
+gossip_local_channel_close,,short_channel_id,struct short_channel_id
+
+# Gossipd->master get this tx output please.
+gossip_get_txout,3018
+gossip_get_txout,,short_channel_id,struct short_channel_id
+
+# master->gossipd here is the output, or empty if none.
+gossip_get_txout_reply,3118
+gossip_get_txout_reply,,short_channel_id,struct short_channel_id
+gossip_get_txout_reply,,satoshis,struct amount_sat
+gossip_get_txout_reply,,len,u16
+gossip_get_txout_reply,,outscript,len*u8
+
+# master->gossipd an htlc failed with this onion error.
+gossip_payment_failure,3021
+gossip_payment_failure,,erring_node,struct pubkey
+gossip_payment_failure,,erring_channel,struct short_channel_id
+gossip_payment_failure,,erring_channel_direction,u8
+gossip_payment_failure,,len,u16
+gossip_payment_failure,,error,len*u8
+
+# master -> gossipd: a potential funding outpoint was spent, please forget the eventual channel
+gossip_outpoint_spent,3024
+gossip_outpoint_spent,,short_channel_id,struct short_channel_id
+
+# master -> gossipd: stop gossip timers.
+gossip_dev_suppress,3032
+
+# master -> gossipd: do you have a memleak?
+gossip_dev_memleak,3033
+
+gossip_dev_memleak_reply,3133
+gossip_dev_memleak_reply,,leak,bool
+
+#include <common/bolt11.h>
+
+# master -> gossipd: get route_info for our incoming channels
+gossip_get_incoming_channels,3025
+gossip_get_incoming_channels,,private_too,?bool
+
+# gossipd -> master: here they are.
+gossip_get_incoming_channels_reply,3125
+gossip_get_incoming_channels_reply,,num,u16
+gossip_get_incoming_channels_reply,,route_info,num*struct route_info

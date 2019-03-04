@@ -3,8 +3,6 @@
 #include "preimage.h"
 #include "pubkey.h"
 #include "script.h"
-#include "signature.h"
-#include "tx.h"
 #include <assert.h>
 #include <ccan/crypto/ripemd160/ripemd160.h>
 #include <ccan/crypto/sha256/sha256.h>
@@ -22,6 +20,7 @@
 #define OP_NOTIF	0x64
 #define OP_ELSE		0x67
 #define OP_ENDIF	0x68
+#define OP_RETURN	0x6a
 #define OP_2DROP	0x6d
 #define OP_DEPTH	0x74
 #define OP_DROP		0x75
@@ -111,13 +110,11 @@ static void add_push_key(u8 **scriptp, const struct pubkey *key)
 	add_push_bytes(scriptp, der, sizeof(der));
 }
 
-static void add_push_sig(u8 **scriptp, const secp256k1_ecdsa_signature *sig)
+static void add_push_sig(u8 **scriptp, const struct bitcoin_signature *sig)
 {
 	u8 der[73];
 	size_t len = signature_to_der(der, sig);
 
-	/* Append sighash type */
-	der[len++] = SIGHASH_ALL;
 	add_push_bytes(scriptp, der, len);
 }
 
@@ -130,13 +127,11 @@ static u8 *stack_key(const tal_t *ctx, const struct pubkey *key)
 }
 
 /* Bitcoin wants DER encoding. */
-static u8 *stack_sig(const tal_t *ctx, const secp256k1_ecdsa_signature *sig)
+static u8 *stack_sig(const tal_t *ctx, const struct bitcoin_signature *sig)
 {
 	u8 der[73];
 	size_t len = signature_to_der(der, sig);
 
-	/* Append sighash type */
-	der[len++] = SIGHASH_ALL;
 	return tal_dup_arr(ctx, u8, der, len, 0);
 }
 
@@ -182,17 +177,24 @@ u8 *bitcoin_redeem_2of2(const tal_t *ctx,
 	return script;
 }
 
+u8 *scriptpubkey_p2sh_hash(const tal_t *ctx, const struct ripemd160 *redeemhash)
+{
+	u8 *script = tal_arr(ctx, u8, 0);
+
+	add_op(&script, OP_HASH160);
+	add_push_bytes(&script, redeemhash->u.u8, sizeof(redeemhash->u.u8));
+	add_op(&script, OP_EQUAL);
+	assert(tal_count(script) == BITCOIN_SCRIPTPUBKEY_P2SH_LEN);
+	return script;
+}
+
 /* Create p2sh for this redeem script. */
 u8 *scriptpubkey_p2sh(const tal_t *ctx, const u8 *redeemscript)
 {
 	struct ripemd160 redeemhash;
-	u8 *script = tal_arr(ctx, u8, 0);
 
-	add_op(&script, OP_HASH160);
 	hash160(&redeemhash, redeemscript, tal_count(redeemscript));
-	add_push_bytes(&script, redeemhash.u.u8, sizeof(redeemhash.u.u8));
-	add_op(&script, OP_EQUAL);
-	return script;
+	return scriptpubkey_p2sh_hash(ctx, &redeemhash);
 }
 
 /* Create an output script using p2pkh */
@@ -205,12 +207,21 @@ u8 *scriptpubkey_p2pkh(const tal_t *ctx, const struct bitcoin_address *addr)
 	add_push_bytes(&script, &addr->addr, sizeof(addr->addr));
 	add_op(&script, OP_EQUALVERIFY);
 	add_op(&script, OP_CHECKSIG);
+	assert(tal_count(script) == BITCOIN_SCRIPTPUBKEY_P2PKH_LEN);
+	return script;
+}
+
+u8 *scriptpubkey_opreturn(const tal_t *ctx)
+{
+	u8 *script = tal_arr(ctx, u8, 0);
+
+	add_op(&script, OP_RETURN);
 	return script;
 }
 
 /* Create an input script which spends p2pkh */
 u8 *bitcoin_redeem_p2pkh(const tal_t *ctx, const struct pubkey *pubkey,
-			 const secp256k1_ecdsa_signature *sig)
+			 const struct bitcoin_signature *sig)
 {
 	u8 *script = tal_arr(ctx, u8, 0);
 
@@ -231,6 +242,8 @@ u8 *bitcoin_redeem_p2sh_p2wpkh(const tal_t *ctx, const struct pubkey *key)
 	add_number(&script, 0);
 	pubkey_to_hash160(key, &keyhash);
 	add_push_bytes(&script, &keyhash, sizeof(keyhash));
+
+	assert(tal_count(script) == BITCOIN_SCRIPTPUBKEY_P2WPKH_LEN);
 	return script;
 }
 
@@ -246,25 +259,8 @@ u8 *bitcoin_scriptsig_p2sh_p2wpkh(const tal_t *ctx, const struct pubkey *key)
 	return script;
 }
 
-/* Create an input which spends the p2sh-p2wpkh. */
-void bitcoin_witness_p2sh_p2wpkh(const tal_t *ctx,
-				 struct bitcoin_tx_input *input,
-				 const secp256k1_ecdsa_signature *sig,
-				 const struct pubkey *key)
-{
-	u8 *redeemscript = bitcoin_redeem_p2sh_p2wpkh(ctx, key);
-
-	/* BIP141: The scriptSig must be exactly a push of the BIP16 redeemScript
-	 * or validation fails. */
-	input->script = tal_arr(ctx, u8, 0);
-	add_push_bytes(&input->script, redeemscript, tal_count(redeemscript));
-	tal_free(redeemscript);
-
-	input->witness = bitcoin_witness_p2wpkh(ctx, sig, key);
-}
-
 u8 **bitcoin_witness_p2wpkh(const tal_t *ctx,
-			    const secp256k1_ecdsa_signature *sig,
+			    const struct bitcoin_signature *sig,
 			    const struct pubkey *key)
 {
 	u8 **witness;
@@ -287,6 +283,7 @@ u8 *scriptpubkey_p2wsh(const tal_t *ctx, const u8 *witnessscript)
 	add_op(&script, OP_0);
 	sha256(&h, witnessscript, tal_count(witnessscript));
 	add_push_bytes(&script, h.u.u8, sizeof(h.u.u8));
+	assert(tal_count(script) == BITCOIN_SCRIPTPUBKEY_P2WSH_LEN);
 	return script;
 }
 
@@ -313,10 +310,19 @@ u8 *scriptpubkey_p2wpkh_derkey(const tal_t *ctx, const u8 der[33])
 	return script;
 }
 
+u8 *scriptpubkey_witness_raw(const tal_t *ctx, u8 version,
+			     const u8 *wprog, size_t wprog_size)
+{
+	u8 *script = tal_arr(ctx, u8, 0);
+	add_number(&script, version);
+	add_push_bytes(&script, wprog, wprog_size);
+	return script;
+}
+
 /* Create a witness which spends the 2of2. */
 u8 **bitcoin_witness_2of2(const tal_t *ctx,
-			  const secp256k1_ecdsa_signature *sig1,
-			  const secp256k1_ecdsa_signature *sig2,
+			  const struct bitcoin_signature *sig1,
+			  const struct bitcoin_signature *sig2,
 			  const struct pubkey *key1,
 			  const struct pubkey *key2)
 {
@@ -362,11 +368,11 @@ u8 *p2wpkh_scriptcode(const tal_t *ctx, const struct pubkey *key)
 	return script;
 }
 
-bool is_p2pkh(const u8 *script)
+bool is_p2pkh(const u8 *script, struct bitcoin_address *addr)
 {
-	size_t script_len = tal_len(script);
+	size_t script_len = tal_count(script);
 
-	if (script_len != 25)
+	if (script_len != BITCOIN_SCRIPTPUBKEY_P2PKH_LEN)
 		return false;
 	if (script[0] != OP_DUP)
 		return false;
@@ -378,14 +384,16 @@ bool is_p2pkh(const u8 *script)
 		return false;
 	if (script[24] != OP_CHECKSIG)
 		return false;
+	if (addr)
+		memcpy(addr, script+3, 20);
 	return true;
 }
 
-bool is_p2sh(const u8 *script)
+bool is_p2sh(const u8 *script, struct ripemd160 *addr)
 {
-	size_t script_len = tal_len(script);
+	size_t script_len = tal_count(script);
 
-	if (script_len != 23)
+	if (script_len != BITCOIN_SCRIPTPUBKEY_P2SH_LEN)
 		return false;
 	if (script[0] != OP_HASH160)
 		return false;
@@ -393,43 +401,50 @@ bool is_p2sh(const u8 *script)
 		return false;
 	if (script[22] != OP_EQUAL)
 		return false;
+	if (addr)
+		memcpy(addr, script+2, 20);
 	return true;
 }
 
-bool is_p2wsh(const u8 *script)
+bool is_p2wsh(const u8 *script, struct sha256 *addr)
 {
-	size_t script_len = tal_len(script);
+	size_t script_len = tal_count(script);
 
-	if (script_len != 1 + 1 + sizeof(struct sha256))
+	if (script_len != BITCOIN_SCRIPTPUBKEY_P2WSH_LEN)
 		return false;
 	if (script[0] != OP_0)
 		return false;
 	if (script[1] != OP_PUSHBYTES(sizeof(struct sha256)))
 		return false;
+	if (addr)
+		memcpy(addr, script+2, sizeof(struct sha256));
 	return true;
 }
 
-bool is_p2wpkh(const u8 *script)
+bool is_p2wpkh(const u8 *script, struct bitcoin_address *addr)
 {
-	size_t script_len = tal_len(script);
+	size_t script_len = tal_count(script);
 
-	if (script_len != 1 + 1 + sizeof(struct ripemd160))
+	if (script_len != BITCOIN_SCRIPTPUBKEY_P2WPKH_LEN)
 		return false;
 	if (script[0] != OP_0)
 		return false;
 	if (script[1] != OP_PUSHBYTES(sizeof(struct ripemd160)))
 		return false;
+	if (addr)
+		memcpy(addr, script+2, sizeof(*addr));
 	return true;
 }
 
-u8 **bitcoin_witness_sig_and_empty(const tal_t *ctx,
-				   const secp256k1_ecdsa_signature *sig,
-				   const u8 *witnessscript)
+u8 **bitcoin_witness_sig_and_element(const tal_t *ctx,
+				     const struct bitcoin_signature *sig,
+				     const void *elem, size_t elemsize,
+				     const u8 *witnessscript)
 {
 	u8 **witness = tal_arr(ctx, u8 *, 3);
 
 	witness[0] = stack_sig(witness, sig);
-	witness[1] = NULL;
+	witness[1] = tal_dup_arr(witness, u8, elem, elemsize, 0);
 	witness[2] = tal_dup_arr(witness, u8,
 				 witnessscript, tal_count(witnessscript), 0);
 
@@ -438,19 +453,19 @@ u8 **bitcoin_witness_sig_and_empty(const tal_t *ctx,
 
 /* BOLT #3:
  *
- * This output sends funds back to the owner of this commitment transaction,
+ * This output sends funds back to the owner of this commitment transaction and
  * thus must be timelocked using `OP_CSV`. It can be claimed, without delay,
- * by the other party if they know the revocation key. The output is a version
- * 0 P2WSH, with a witness script:
+ * by the other party if they know the revocation private key. The output is a
+ * version-0 P2WSH, with a witness script:
  *
  *     OP_IF
  *         # Penalty transaction
- *         <revocationkey>
+ *         <revocationpubkey>
  *     OP_ELSE
  *         `to_self_delay`
  *         OP_CSV
  *         OP_DROP
- *         <local_delayedkey>
+ *         <local_delayedpubkey>
  *     OP_ENDIF
  *     OP_CHECKSIG
  */
@@ -471,53 +486,33 @@ u8 *bitcoin_wscript_to_local(const tal_t *ctx, u16 to_self_delay,
 	return script;
 }
 
-u8 **bitcoin_to_local_spend_revocation(const tal_t *ctx,
-		const secp256k1_ecdsa_signature *revocation_sig,
-		const u8 *wscript)
-{
-	/* BOLT #3:
-	 *
-	 * If a revoked commitment transaction is published, the other party
-	 * can spend this output immediately with the following witness:
-	 *
-	 *    <revocation_sig> 1
-	 */
-	u8 **witness = tal_arr(ctx, u8 *, 3);
-
-	witness[0] = stack_sig(witness, revocation_sig);
-	witness[1] = stack_number(witness, 1);
-	witness[2] = tal_dup_arr(witness, u8, wscript, tal_len(wscript), 0);
-
-	return witness;
-}
-
 /* BOLT #3:
  *
  * #### Offered HTLC Outputs
  *
- * This output sends funds to a HTLC-timeout transaction after the HTLC
- * timeout, or to the remote peer using the payment preimage or the revocation
- * key.  The output is a P2WSH, with a witness script:
+ * This output sends funds to either an HTLC-timeout transaction after the
+ * HTLC-timeout or to the remote node using the payment preimage or the
+ * revocation key. The output is a P2WSH, with a witness script:
  *
- *     # To you with revocation key
- *     OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationkey))> OP_EQUAL
+ *     # To remote node with revocation key
+ *     OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL
  *     OP_IF
  *         OP_CHECKSIG
  *     OP_ELSE
- *         <remotekey> OP_SWAP OP_SIZE 32 OP_EQUAL
+ *         <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
  *         OP_NOTIF
- *             # To me via HTLC-timeout transaction (timelocked).
- *             OP_DROP 2 OP_SWAP <localkey> 2 OP_CHECKMULTISIG
+ *             # To local node via HTLC-timeout transaction (timelocked).
+ *             OP_DROP 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
  *         OP_ELSE
- *             # To you with preimage.
+ *             # To remote node with preimage.
  *             OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
  *             OP_CHECKSIG
  *         OP_ENDIF
  *     OP_ENDIF
  */
 u8 *bitcoin_wscript_htlc_offer_ripemd160(const tal_t *ctx,
-					 const struct pubkey *localkey,
-					 const struct pubkey *remotekey,
+					 const struct pubkey *localhtlckey,
+					 const struct pubkey *remotehtlckey,
 					 const struct ripemd160 *payment_ripemd,
 					 const struct pubkey *revocationkey)
 {
@@ -532,7 +527,7 @@ u8 *bitcoin_wscript_htlc_offer_ripemd160(const tal_t *ctx,
 	add_op(&script, OP_IF);
 	add_op(&script, OP_CHECKSIG);
 	add_op(&script, OP_ELSE);
-	add_push_key(&script, remotekey);
+	add_push_key(&script, remotehtlckey);
 	add_op(&script, OP_SWAP);
 	add_op(&script, OP_SIZE);
 	add_number(&script, 32);
@@ -541,7 +536,7 @@ u8 *bitcoin_wscript_htlc_offer_ripemd160(const tal_t *ctx,
 	add_op(&script, OP_DROP);
 	add_number(&script, 2);
 	add_op(&script, OP_SWAP);
-	add_push_key(&script, localkey);
+	add_push_key(&script, localhtlckey);
 	add_number(&script, 2);
 	add_op(&script, OP_CHECKMULTISIG);
 	add_op(&script, OP_ELSE);
@@ -557,15 +552,16 @@ u8 *bitcoin_wscript_htlc_offer_ripemd160(const tal_t *ctx,
 }
 
 u8 *bitcoin_wscript_htlc_offer(const tal_t *ctx,
-			       const struct pubkey *localkey,
-			       const struct pubkey *remotekey,
+			       const struct pubkey *localhtlckey,
+			       const struct pubkey *remotehtlckey,
 			       const struct sha256 *payment_hash,
 			       const struct pubkey *revocationkey)
 {
 	struct ripemd160 ripemd;
 
 	ripemd160(&ripemd, payment_hash->u.u8, sizeof(payment_hash->u));
-	return bitcoin_wscript_htlc_offer_ripemd160(ctx, localkey, remotekey,
+	return bitcoin_wscript_htlc_offer_ripemd160(ctx, localhtlckey,
+						    remotehtlckey,
 						    &ripemd, revocationkey);
 }
 
@@ -573,23 +569,23 @@ u8 *bitcoin_wscript_htlc_offer(const tal_t *ctx,
  *
  * #### Received HTLC Outputs
  *
- * This output sends funds to the remote peer after the HTLC timeout or using
- * the revocation key, or to an HTLC-success transaction with a successful
- * payment preimage. The output is a P2WSH, with a witness script:
+ * This output sends funds to either the remote node after the HTLC-timeout or
+ * using the revocation key, or to an HTLC-success transaction with a
+ * successful payment preimage. The output is a P2WSH, with a witness script:
  *
- *     # To you with revocation key
- *     OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationkey))> OP_EQUAL
+ *     # To remote node with revocation key
+ *     OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL
  *     OP_IF
  *         OP_CHECKSIG
  *     OP_ELSE
- *         <remotekey> OP_SWAP
+ *         <remote_htlcpubkey> OP_SWAP
  *             OP_SIZE 32 OP_EQUAL
  *         OP_IF
- *             # To me via HTLC-success transaction.
+ *             # To local node via HTLC-success transaction.
  *             OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
- *             2 OP_SWAP <localkey> 2 OP_CHECKMULTISIG
+ *             2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
  *         OP_ELSE
- *             # To you after timeout.
+ *             # To remote node after timeout.
  *             OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
  *             OP_CHECKSIG
  *         OP_ENDIF
@@ -597,8 +593,8 @@ u8 *bitcoin_wscript_htlc_offer(const tal_t *ctx,
  */
 u8 *bitcoin_wscript_htlc_receive_ripemd(const tal_t *ctx,
 					const struct abs_locktime *htlc_abstimeout,
-					const struct pubkey *localkey,
-					const struct pubkey *remotekey,
+					const struct pubkey *localhtlckey,
+					const struct pubkey *remotehtlckey,
 					const struct ripemd160 *payment_ripemd,
 					const struct pubkey *revocationkey)
 {
@@ -613,7 +609,7 @@ u8 *bitcoin_wscript_htlc_receive_ripemd(const tal_t *ctx,
 	add_op(&script, OP_IF);
 	add_op(&script, OP_CHECKSIG);
 	add_op(&script, OP_ELSE);
-	add_push_key(&script, remotekey);
+	add_push_key(&script, remotehtlckey);
 	add_op(&script, OP_SWAP);
 	add_op(&script, OP_SIZE);
 	add_number(&script, 32);
@@ -625,7 +621,7 @@ u8 *bitcoin_wscript_htlc_receive_ripemd(const tal_t *ctx,
 	add_op(&script, OP_EQUALVERIFY);
 	add_number(&script, 2);
 	add_op(&script, OP_SWAP);
-	add_push_key(&script, localkey);
+	add_push_key(&script, localhtlckey);
 	add_number(&script, 2);
 	add_op(&script, OP_CHECKMULTISIG);
 	add_op(&script, OP_ELSE);
@@ -642,8 +638,8 @@ u8 *bitcoin_wscript_htlc_receive_ripemd(const tal_t *ctx,
 
 u8 *bitcoin_wscript_htlc_receive(const tal_t *ctx,
 				 const struct abs_locktime *htlc_abstimeout,
-				 const struct pubkey *localkey,
-				 const struct pubkey *remotekey,
+				 const struct pubkey *localhtlckey,
+				 const struct pubkey *remotehtlckey,
 				 const struct sha256 *payment_hash,
 				 const struct pubkey *revocationkey)
 {
@@ -651,7 +647,7 @@ u8 *bitcoin_wscript_htlc_receive(const tal_t *ctx,
 
 	ripemd160(&ripemd, payment_hash->u.u8, sizeof(payment_hash->u));
 	return bitcoin_wscript_htlc_receive_ripemd(ctx, htlc_abstimeout,
-						   localkey, remotekey,
+						   localhtlckey, remotehtlckey,
 						   &ripemd, revocationkey);
 }
 
@@ -660,41 +656,40 @@ u8 *bitcoin_wscript_htlc_receive(const tal_t *ctx,
  * ## HTLC-Timeout and HTLC-Success Transactions
  *
  *...
- *   * `txin[0]` witness stack: `0 <remotesig> <localsig>  <payment_preimage>` for HTLC-Success, `0 <remotesig> <localsig> 0` for HTLC-Timeout.
+ *   * `txin[0]` witness stack: `0 <remotehtlcsig> <localhtlcsig>  <payment_preimage>` for HTLC-success, `0 <remotehtlcsig> <localhtlcsig> 0` for HTLC-timeout
  */
-u8 **bitcoin_htlc_offer_spend_timeout(const tal_t *ctx,
-			      const secp256k1_ecdsa_signature *localsig,
-			      const secp256k1_ecdsa_signature *remotesig,
-			      const u8 *wscript)
+u8 **bitcoin_witness_htlc_timeout_tx(const tal_t *ctx,
+				     const struct bitcoin_signature *localhtlcsig,
+				     const struct bitcoin_signature *remotehtlcsig,
+				     const u8 *wscript)
 {
 	u8 **witness = tal_arr(ctx, u8 *, 5);
 
 	witness[0] = stack_number(witness, 0);
-	witness[1] = stack_sig(witness, remotesig);
-	witness[2] = stack_sig(witness, localsig);
+	witness[1] = stack_sig(witness, remotehtlcsig);
+	witness[2] = stack_sig(witness, localhtlcsig);
 	witness[3] = stack_number(witness, 0);
-	witness[4] = tal_dup_arr(witness, u8, wscript, tal_len(wscript), 0);
+	witness[4] = tal_dup_arr(witness, u8, wscript, tal_count(wscript), 0);
 
 	return witness;
 }
 
-u8 **bitcoin_htlc_receive_spend_preimage(const tal_t *ctx,
-				const secp256k1_ecdsa_signature *localsig,
-				const secp256k1_ecdsa_signature *remotesig,
-				const struct preimage *preimage,
-				const u8 *wscript)
+u8 **bitcoin_witness_htlc_success_tx(const tal_t *ctx,
+				     const struct bitcoin_signature *localhtlcsig,
+				     const struct bitcoin_signature *remotesig,
+				     const struct preimage *preimage,
+				     const u8 *wscript)
 {
 	u8 **witness = tal_arr(ctx, u8 *, 5);
 
 	witness[0] = stack_number(witness, 0);
 	witness[1] = stack_sig(witness, remotesig);
-	witness[2] = stack_sig(witness, localsig);
+	witness[2] = stack_sig(witness, localhtlcsig);
 	witness[3] = stack_preimage(witness, preimage);
-	witness[4] = tal_dup_arr(witness, u8, wscript, tal_len(wscript), 0);
+	witness[4] = tal_dup_arr(witness, u8, wscript, tal_count(wscript), 0);
 
 	return witness;
 }
-
 u8 *bitcoin_wscript_htlc_tx(const tal_t *ctx,
 			    u16 to_self_delay,
 			    const struct pubkey *revocation_pubkey,
@@ -708,12 +703,12 @@ u8 *bitcoin_wscript_htlc_tx(const tal_t *ctx,
 	 *
 	 *     OP_IF
 	 *         # Penalty transaction
-	 *         <revocationkey>
+	 *         <revocationpubkey>
 	 *     OP_ELSE
 	 *         `to_self_delay`
 	 *         OP_CSV
 	 *         OP_DROP
-	 *         <local_delayedkey>
+	 *         <local_delayedpubkey>
 	 *     OP_ENDIF
 	 *     OP_CHECKSIG
 	 */
@@ -730,12 +725,12 @@ u8 *bitcoin_wscript_htlc_tx(const tal_t *ctx,
 	return script;
 }
 
-bool scripteq(const tal_t *s1, const tal_t *s2)
+bool scripteq(const u8 *s1, const u8 *s2)
 {
-	memcheck(s1, tal_len(s1));
-	memcheck(s2, tal_len(s2));
+	memcheck(s1, tal_count(s1));
+	memcheck(s2, tal_count(s2));
 
-	if (tal_len(s1) != tal_len(s2))
+	if (tal_count(s1) != tal_count(s2))
 		return false;
-	return memcmp(s1, s2, tal_len(s1)) == 0;
+	return memcmp(s1, s2, tal_count(s1)) == 0;
 }

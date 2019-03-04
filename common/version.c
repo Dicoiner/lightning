@@ -7,10 +7,11 @@ const char *version(void)
 	return VERSION;
 }
 
-char *version_and_exit(const void *unused)
+char *version_and_exit(const void *unused UNUSED)
 {
-	printf("%s\n"
-	       "aka. %s\n"
-	       "Built with: %s\n", VERSION, VERSION_NAME, BUILD_FEATURES);
+	printf("%s\n", VERSION);
+	if (BUILD_FEATURES[0]) {
+		printf("Built with features: %s\n", BUILD_FEATURES);
+	}
 	exit(0);
 }

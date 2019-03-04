@@ -22,7 +22,7 @@ LIGHTNINGD_ONCHAIN_HEADERS_NOGEN :=			\
 
 LIGHTNINGD_ONCHAIN_HEADERS := $(LIGHTNINGD_ONCHAIN_HEADERS_GEN) $(LIGHTNINGD_ONCHAIN_HEADERS_NOGEN)
 
-LIGHTNINGD_ONCHAIN_SRC := onchaind/onchain.c	\
+LIGHTNINGD_ONCHAIN_SRC := onchaind/onchaind.c	\
 	onchaind/gen_onchain_wire.c		\
 	onchaind/onchain_wire.c
 
@@ -47,21 +47,30 @@ $(LIGHTNINGD_ONCHAIN_OBJS): $(LIGHTNINGD_HEADERS)
 
 # Common source we use.
 ONCHAIND_COMMON_OBJS :=				\
+	common/amount.o				\
+	common/bip32.o				\
+	common/daemon.o				\
 	common/daemon_conn.o			\
-	common/debug.o				\
 	common/derive_basepoints.o		\
 	common/dev_disconnect.o			\
+	common/gen_status_wire.o		\
 	common/htlc_tx.o			\
 	common/htlc_wire.o			\
 	common/initial_commit_tx.o		\
 	common/keyset.o				\
 	common/key_derive.o			\
+	common/memleak.o			\
 	common/msg_queue.o			\
+	common/peer_billboard.o			\
 	common/permute_tx.o			\
 	common/status.o				\
+	common/status_wire.o			\
+	common/subdaemon.o			\
 	common/type_to_string.o			\
 	common/utils.o				\
-	common/version.o
+	common/utxo.o				\
+	common/version.o			\
+	hsmd/gen_hsm_wire.o
 
 onchaind/gen_onchain_wire.h: $(WIRE_GEN) onchaind/onchain_wire.csv
 	$(WIRE_GEN) --header $@ onchain_wire_type < onchaind/onchain_wire.csv > $@
@@ -76,7 +85,7 @@ ALL_OBJS += $(LIGHTNINGD_ONCHAIN_OBJS)
 ALL_PROGRAMS += lightningd/lightning_onchaind
 ALL_GEN_HEADERS += $(LIGHTNINGD_ONCHAIN_HEADERS_GEN)
 
-lightningd/lightning_onchaind: $(LIGHTNINGD_ONCHAIN_OBJS) $(WIRE_ONION_OBJS) $(ONCHAIND_COMMON_OBJS) $(WIRE_OBJS) $(BITCOIN_OBJS)
+lightningd/lightning_onchaind: $(LIGHTNINGD_ONCHAIN_OBJS) $(WIRE_ONION_OBJS) $(ONCHAIND_COMMON_OBJS) $(WIRE_OBJS) $(BITCOIN_OBJS) $(LIGHTNINGD_HSM_CLIENT_OBJS)
 
 check-source: $(LIGHTNINGD_ONCHAIN_SRC_NOGEN:%=check-src-include-order/%)
 check-source-bolt: $(LIGHTNINGD_ONCHAIN_SRC:%=bolt-check/%) $(LIGHTNINGD_ONCHAIN_HEADERS:%=bolt-check/%)
@@ -86,6 +95,6 @@ check-whitespace: $(LIGHTNINGD_ONCHAIN_SRC_NOGEN:%=check-whitespace/%) $(LIGHTNI
 clean: onchaind-clean
 
 onchaind-clean:
-	$(RM) $(LIGHTNINGD_ONCHAIN_OBJS) gen_*
+	$(RM) $(LIGHTNINGD_ONCHAIN_OBJS) onchaind/gen_*
 
--include onchaind/test/Makefile 
+-include onchaind/test/Makefile

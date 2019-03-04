@@ -4,7 +4,8 @@
 wire-wrongdir:
 	$(MAKE) -C .. wire-all
 
-WIRE_HEADERS_NOGEN := wire/peer_wire.h		\
+WIRE_HEADERS_NOGEN := wire/onion_defs.h		\
+		wire/peer_wire.h		\
 		wire/wire.h			\
 		wire/wire_sync.h		\
 		wire/wire_io.h
@@ -25,25 +26,27 @@ ALL_OBJS += $(WIRE_OBJS) $(WIRE_ONION_OBJS)
 ALL_GEN_HEADERS += $(WIRE_GEN_HEADERS)
 
 # They may not have the bolts.
-BOLT_EXTRACT=$(BOLTDIR)/tools/extract-formats.py
-# FIXME: Re-enable --check-alignment!
-wire/gen_peer_wire_csv: FORCE
-	@set -e; if [ -f $(BOLT_EXTRACT) ]; then for f in $(BOLTDIR)/0[127]*.md $(BOLT_EXTRACT); do if [ $$f -nt $@ -o ! -f $@ ]; then $(BOLT_EXTRACT) --message-fields --message-types $(BOLTDIR)/0[127]*.md > $@; break; fi; done; fi
+BOLT_EXTRACT=$(LOCAL_BOLTDIR)/tools/extract-formats.py
 
-wire/gen_onion_wire_csv: FORCE
-	@set -e; if [ -f $(BOLT_EXTRACT) ]; then for f in $(BOLTDIR)/04*.md $(BOLT_EXTRACT); do if [ $$f -nt $@ -o ! -f $@ ]; then echo '#include <wire/onion_defs.h>' > $@ && $(BOLT_EXTRACT) --message-fields --message-types --check-alignment $(BOLTDIR)/04*.md >> $@; break; fi; done; fi
+ifeq ($(DEVELOPER),1)
+wire/gen_peer_wire_csv: bolt-precheck
+	@set -e; if [ -d $(LOCAL_BOLTDIR) ]; then for f in $(LOCAL_BOLTDIR)/0[127]*.md $(BOLT_EXTRACT); do if [ $$f -nt $@ -o ! -f $@ ]; then $(BOLT_EXTRACT) --message-fields --message-types $(LOCAL_BOLTDIR)/0[127]*.md > $@; break; fi; done; fi
+
+wire/gen_onion_wire_csv: bolt-precheck
+	@set -e; if [ -f $(BOLT_EXTRACT) ]; then for f in $(LOCAL_BOLTDIR)/04*.md $(BOLT_EXTRACT); do if [ $$f -nt $@ -o ! -f $@ ]; then echo '#include <wire/onion_defs.h>' > $@ && $(BOLT_EXTRACT) --message-fields --message-types $(LOCAL_BOLTDIR)/04*.md >> $@; break; fi; done; fi
+endif
 
 wire/gen_peer_wire.h: $(WIRE_GEN) wire/gen_peer_wire_csv
-	$(WIRE_GEN) --header $@ wire_type < wire/gen_peer_wire_csv > $@
+	$(WIRE_GEN) --bolt --header $@ wire_type < wire/gen_peer_wire_csv > $@
 
 wire/gen_peer_wire.c: $(WIRE_GEN) wire/gen_peer_wire_csv
-	$(WIRE_GEN) ${@:.c=.h} wire_type < wire/gen_peer_wire_csv > $@
+	$(WIRE_GEN) --bolt ${@:.c=.h} wire_type < wire/gen_peer_wire_csv > $@
 
 wire/gen_onion_wire.h: $(WIRE_GEN) wire/gen_onion_wire_csv
-	$(WIRE_GEN) --header $@ onion_type < wire/gen_onion_wire_csv > $@
+	$(WIRE_GEN) --bolt --header $@ onion_type < wire/gen_onion_wire_csv > $@
 
 wire/gen_onion_wire.c: $(WIRE_GEN) wire/gen_onion_wire_csv
-	$(WIRE_GEN) ${@:.c=.h} onion_type < wire/gen_onion_wire_csv > $@
+	$(WIRE_GEN) --bolt ${@:.c=.h} onion_type < wire/gen_onion_wire_csv > $@
 
 check-source: $(WIRE_SRC:%=check-src-include-order/%) $(WIRE_HEADERS_NOGEN:%=check-hdr-include-order/%)
 

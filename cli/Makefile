@@ -4,6 +4,8 @@ LIGHTNING_CLI_OBJS := $(LIGHTNING_CLI_SRC:.c=.o)
 LIGHTNING_CLI_COMMON_OBJS :=			\
 	common/configdir.o			\
 	common/json.o				\
+	common/memleak.o			\
+	common/utils.o				\
 	common/version.o
 
 lightning-cli-all: cli/lightning-cli
@@ -25,3 +27,4 @@ clean: lightning-cli-clean
 lightning-cli-clean:
 	$(RM) $(LIGHTNING-CLI_LIB_OBJS) $(DAEMON_JSMN_OBJS)
 
+include cli/test/Makefile

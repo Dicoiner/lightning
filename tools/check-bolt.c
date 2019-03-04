@@ -7,6 +7,7 @@
 #include <ccan/tal/path/path.h>
 #include <ccan/tal/str/str.h>
 #include <ccan/tal/tal.h>
+#include <common/utils.h>
 #include <sys/types.h>
 #include <dirent.h>
 
@@ -46,7 +47,6 @@ static bool get_files(const char *dir, const char *subdir,
 {
 	char *path = path_join(NULL, dir, subdir);
 	DIR *d = opendir(path);
-	size_t n = tal_count(*files);
 	struct dirent *e;
 
 	if (!d)
@@ -54,6 +54,7 @@ static bool get_files(const char *dir, const char *subdir,
 
 	while ((e = readdir(d)) != NULL) {
 		int preflen;
+		struct bolt_file bf;
 
 		/* Must end in .md */
 		if (!strends(e->d_name, ".md"))
@@ -73,14 +74,12 @@ static bool get_files(const char *dir, const char *subdir,
 		if (verbose)
 			printf("Found bolt %.*s\n", preflen, e->d_name);
 
-		tal_resize(files, n+1);
-		(*files)[n].prefix = tal_strndup(*files,
-						 e->d_name, preflen);
-		(*files)[n].contents
+		bf.prefix = tal_strndup(*files, e->d_name, preflen);
+		bf.contents
 			= canonicalize(grab_file(*files,
 						 path_join(path, path,
 							   e->d_name)));
-		n++;
+		tal_arr_expand(files, bf);
 	}
 	return true;
 }
@@ -160,7 +159,7 @@ static char *code_to_regex(const char *code, size_t len, bool escape)
 				after_nl = false;
 				continue;
 			}
-			/* Fall thru. */
+			/* Fall through. */
 		case '.':
 		case '$':
 		case '^':
@@ -172,7 +171,7 @@ static char *code_to_regex(const char *code, size_t len, bool escape)
 		case '|':
 			if (escape)
 				*(p++) = '\\';
-			/* Fall thru */
+			/* Fall through */
 		default:
 			*(p++) = code[i];
 		}
@@ -256,6 +255,8 @@ static struct bolt_file *find_bolt(const char *bolt_prefix,
 
 int main(int argc, char *argv[])
 {
+	setup_locale();
+
 	struct bolt_file *bolts;
 	int i;
 

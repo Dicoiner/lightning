@@ -223,7 +223,8 @@ struct io_plan *io_write_(struct io_conn *conn,
  *
  * This creates a plan to read data into a buffer.  Once it's all
  * read, the @next function will be called: on an error, the finish
- * function is called instead.
+ * function is called instead.  If read() returns 0 (EOF) errno is set
+ * to 0.
  *
  * Note that the I/O may actually be done immediately.
  *
@@ -256,7 +257,8 @@ struct io_plan *io_read_(struct io_conn *conn,
  *
  * This creates a plan to read data into a buffer.  Once any data is
  * read, @len is updated and the @next function will be called: on an
- * error, the finish function is called instead.
+ * error, the finish function is called instead.  If read() returns 0 (EOF)
+ * errno is set to 0.
  *
  * Note that the I/O may actually be done immediately.
  *
@@ -673,6 +675,34 @@ void *io_loop(struct timers *timers, struct timer **expired);
  *	io_close_taken_fd
  */
 int io_conn_fd(const struct io_conn *conn);
+
+/**
+ * io_plan_in_started - is this conn doing input I/O now?
+ * @conn: the conn.
+ *
+ * This returns true if input I/O has been performed on the conn but
+ * @next hasn't been called yet.  For example, io_read() may have done
+ * a partial read.
+ *
+ * This can be useful if we want to terminate a connection only after
+ * reading a whole packet: if this returns true, we would wait until
+ * @next is called.
+ */
+bool io_plan_in_started(const struct io_conn *conn);
+
+/**
+ * io_plan_out_started - is this conn doing output I/O now?
+ * @conn: the conn.
+ *
+ * This returns true if output I/O has been performed on the conn but
+ * @next hasn't been called yet.  For example, io_write() may have done
+ * a partial write.
+ *
+ * This can be useful if we want to terminate a connection only after
+ * writing a whole packet: if this returns true, we would wait until
+ * @next is called.
+ */
+bool io_plan_out_started(const struct io_conn *conn);
 
 /**
  * io_flush_sync - (synchronously) complete any outstanding output.

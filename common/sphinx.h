@@ -9,6 +9,7 @@
 #include <ccan/tal/tal.h>
 #include <secp256k1.h>
 #include <sodium/randombytes.h>
+#include <wire/gen_onion_wire.h>
 #include <wire/wire.h>
 
 #define SECURITY_PARAMETER 32
@@ -22,7 +23,7 @@ struct onionpacket {
 	/* Cleartext information */
 	u8 version;
 	u8 mac[SECURITY_PARAMETER];
-	secp256k1_pubkey ephemeralkey;
+	struct pubkey ephemeralkey;
 
 	/* Encrypted information */
 	u8 routinginfo[ROUTING_INFO_SIZE];
@@ -35,9 +36,9 @@ enum route_next_case {
 
 /* BOLT #4:
  *
- * The `hops_data` field is a structure that holds obfuscated versions of the
- * next hop's address, transfer information and the associated HMAC. It is
- * 1300 bytes long, and has the following structure:
+ * The `hops_data` field is a structure that holds obfuscations of the
+ * next hop's address, transfer information, and its associated HMAC. It is
+ * 1300 bytes (`20x65`) long and has the following structure:
  *
  * 1. type: `hops_data`
  * 2. data:
@@ -47,14 +48,14 @@ enum route_next_case {
  *    * ...
  *    * `filler`
  *
- * Where the `realm`, `HMAC` and `per_hop` (whose contents depend on `realm`)
- * are repeated for each hop, and `filler` consists of obfuscated
- * deterministically generated padding. For details about how the `filler` is
- * generated please see below. In addition, `hops_data` is incrementally
- * obfuscated at each hop.
+ * Where, the `realm`, `per_hop` (with contents dependent on `realm`), and `HMAC`
+ * are repeated for each hop; and where, `filler` consists of obfuscated,
+ * deterministically-generated padding, as detailed in
+ * [Filler Generation](#filler-generation).  Additionally, `hops_data` is
+ * incrementally obfuscated at each hop.
  *
- * The `realm` byte determines the format of the `per_hop`; so far only
- * `realm` 0 is defined, and for that, the `per_hop` format is:
+ * The `realm` byte determines the format of the `per_hop` field; currently, only
+ * `realm` 0 is defined, for which the `per_hop` format follows:
  *
  * 1. type: `per_hop` (for `realm` 0)
  * 2. data:
@@ -66,7 +67,7 @@ enum route_next_case {
 struct hop_data {
 	u8 realm;
 	struct short_channel_id channel_id;
-	u64 amt_forward;
+	struct amount_msat amt_forward;
 	u32 outgoing_cltv;
 	/* Padding omitted, will be zeroed */
 	u8 hmac[SECURITY_PARAMETER];
@@ -148,13 +149,13 @@ u8 *serialize_onionpacket(
  *
  * @ctx: tal context to allocate from
  * @src: buffer to read the packet from
- * @srclen: length of the @src
+ * @srclen: length of the @src (must be TOTAL_PACKET_SIZE)
+ * @why_bad: if NULL return, this is what was wrong with the packet.
  */
-struct onionpacket *parse_onionpacket(
-	const tal_t *ctx,
-	const void *src,
-	const size_t srclen
-	);
+struct onionpacket *parse_onionpacket(const tal_t *ctx,
+				      const void *src,
+				      const size_t srclen,
+				      enum onion_type *why_bad);
 
 struct onionreply {
 	/* Node index in the path that is replying */
